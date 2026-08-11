@@ -98,25 +98,56 @@ xSemaphoreGive(mutex)           xSemaphoreGive(mutex)
 
 | ครั้งที่ | Temperature (°C) | Humidity (%) | Light Lux | Timestamp (ms) |
 | :------: | :--------------: | :----------: | :-------: | :------------: |
-|  **1**   |                  |              |           |                |
-|  **2**   |                  |              |           |                |
-|  **3**   |                  |              |           |                |
+|  **1**   |        28.6      |     60.6     |    611    |     178660      |
+|  **2**   |        29.2      |     56.1     |    473    |     180170      |
+|  **3**   |        31.5      |     62.7     |    622    |     183190      |
 
 ### 7.2 ทดสอบ JSON API (`/api/data`)
 
 บันทึก Raw JSON Response จาก Browser:
 
 ```json
-
+{"temperature":30.60,"humidity":65.90,"light_lux":282,"timestamp_ms":106180}
 ```
 
 ---
 
 ## 8. คำถามท้ายการทดลอง (Post-Lab Questions)
 
-1. เหตุใดจึงต้องใช้ **Mutex** ในการป้องกันการเข้าถึงตัวแปร `g_latest_data` ร่วมกันระหว่าง `vNetworkTask` และ HTTP Handler? ถ้าไม่ใช้จะเกิดอะไรขึ้น?
-2. `esp_http_server` รัน Handler บน Thread ใด — เป็น Thread เดียวกับ FreeRTOS Task ของเราหรือไม่?
-3. การที่ Dashboard ใช้ `<meta http-equiv="refresh" content="2">` แทนที่จะใช้ JavaScript `fetch()` มีข้อดีและข้อเสียอย่างไร?
+1. เหตุใดจึงต้องใช้ Mutex ในการป้องกันการเข้าถึงตัวแปร `g_latest_data` ร่วมกันระหว่าง `vNetworkTask` และ HTTP Handler? ถ้าไม่ใช้จะเกิดอะไรขึ้น?**
+
+ต้องใช้ Mutex เพราะ `g_latest_data` เป็น **Shared Resource** ที่ถูกเข้าถึงจากสอง Context การทำงานที่แตกต่างกันพร้อมกันได้ (concurrent access) คือ:
+- `vNetworkTask` — เขียนข้อมูลใหม่ลงตัวแปรทุกครั้งที่รับข้อมูลจาก Queue (ทุก ~1.5 วินาที)
+- HTTP GET Handler ของ `/api/data` — อ่านข้อมูลจากตัวแปรนี้ทุกครั้งที่ Browser ยิง request เข้ามา (ซึ่งอาจเกิดขึ้นได้ทุกเวลา ไม่สัมพันธ์กับจังหวะของ `vNetworkTask` เลย)
+
+เนื่องจากตัวแปร `g_latest_data` เป็น struct ที่มีหลาย field (temperature, humidity, light_lux, timestamp) การเขียนค่าจึงไม่ได้เกิดขึ้นในคำสั่งเดียว (ไม่ atomic) หากไม่มี Mutex ป้องกัน อาจเกิด **Race Condition / Torn Read** ได้ เช่น:
+- `vNetworkTask` กำลังเขียนค่า `temperature` ใหม่เสร็จแล้ว แต่ยังไม่ทันเขียน `humidity` — ในจังหวะนั้นพอดี HTTP Handler เข้ามาอ่านค่า จะได้ temperature ใหม่คู่กับ humidity เก่า ทำให้ข้อมูลไม่สอดคล้องกัน (inconsistent data)
+- ในกรณีที่เลวร้ายกว่านั้น หากมีการเขียน/อ่านข้อมูลประเภทที่ compiler/hardware ไม่รับประกันความเป็น atomic (เช่น float หรือ multi-byte value บางสถาปัตยกรรม) อาจได้ค่าที่เป็นขยะ (garbage value) ผสมกันระหว่างค่าเก่ากับค่าใหม่ไปเลย
+
+การใช้ `xSemaphoreTake(mutex, ...)` ก่อนเขียน/อ่าน และ `xSemaphoreGive(mutex)` หลังทำเสร็จ จะบังคับให้การเข้าถึง `g_latest_data` เกิดขึ้นทีละฝ่ายเท่านั้น (mutual exclusion) รับประกันว่าข้อมูลที่อ่านได้จะสมบูรณ์และถูกต้องเสมอ (consistent snapshot) ไม่ว่า HTTP request จะยิงเข้ามาจังหวะไหนก็ตาม
+
+2. `esp_http_server` รัน Handler บน Thread ใด — เป็น Thread เดียวกับ FreeRTOS Task ของเราหรือไม่?**
+
+ไม่ใช่ Thread เดียวกัน — `esp_http_server` component ของ ESP-IDF จะสร้าง **FreeRTOS Task แยกต่างหากของตัวเอง** ขึ้นมาโดยอัตโนมัติเมื่อเรียก `httpd_start()` (ค่าเริ่มต้นมักตั้งชื่อ task ประมาณ `httpd` หรือกำหนดผ่าน `httpd_config_t`) โดย Task นี้ทำหน้าที่ฟัง Socket บน Port 80 และเรียก Handler function ที่เรา register ไว้ (เช่น handler ของ `/` และ `/api/data`) เมื่อมี Client (Browser) ส่ง Request เข้ามา
+
+เพราะฉะนั้นในระบบนี้จึงมี Task ทำงานคู่ขนานกันอย่างน้อย 3 Task คือ `vSensorTask`, `vNetworkTask`, และ Task ภายในของ `esp_http_server` — ทั้งสาม Task ทำงานอิสระจากกัน ถูกสลับกันทำงานโดย FreeRTOS Scheduler ตามลำดับความสำคัญ (priority) และจังหวะเวลา นี่คือเหตุผลสำคัญที่ทำให้ **ต้องใช้ Mutex** ป้องกันตามคำตอบข้อ 1 เพราะ HTTP Handler ไม่ได้รันอยู่ใน Task เดียวกับ `vNetworkTask` การเข้าถึงตัวแปรร่วมจึงเกิด Race Condition ได้จริงตามหลักการ Concurrent Programming
+
+3. การที่ Dashboard ใช้ `<meta http-equiv="refresh" content="2">` แทนที่จะใช้ JavaScript `fetch()` มีข้อดีและข้อเสียอย่างไร?**
+
+**ข้อดีของ Meta Refresh:**
+- **เรียบง่ายมาก** ไม่ต้องเขียน JavaScript เลย ใช้ได้แม้ Browser จะปิด JavaScript ไว้ หรือเป็นอุปกรณ์รุ่นเก่าที่รองรับ JS จำกัด
+- **ใช้ทรัพยากรฝั่ง ESP32 น้อย** เพราะไม่ต้องเปิด Endpoint หรือจัดการ Response แบบ Asynchronous ที่ซับซ้อน ตัว handler ของ `/` ก็ส่ง HTML คงที่พร้อม meta tag กลับไปตรงๆ
+- **เข้ากันได้กับ Browser ทุกรุ่น (Compatibility สูง)** ไม่ต้องกังวลเรื่อง CORS หรือ API ของ JavaScript ที่อาจไม่รองรับในบาง Browser รุ่นเก่า
+- โค้ดฝั่ง Client ทำความเข้าใจง่าย เหมาะกับงานสาธิต/การศึกษา
+
+**ข้อเสียของ Meta Refresh:**
+- **โหลดหน้าใหม่ทั้งหน้า (Full Page Reload)** ทุกครั้งที่ refresh ทำให้หน้าจอกระพริบ (flicker) เห็นได้ชัดโดยเฉพาะบนมือถือ ประสบการณ์ผู้ใช้ (UX) ไม่ลื่นไหล
+- **สิ้นเปลือง Bandwidth และทรัพยากรมากกว่า** เพราะต้องส่ง HTML ทั้งหน้า (Header, CSS, Layout ทั้งหมด) ซ้ำทุก 2 วินาที ทั้งที่จริงๆ มีแค่ตัวเลขไม่กี่ค่าที่เปลี่ยน ต่างจาก `fetch()` ที่ดึงแค่ JSON ก้อนเล็กๆ จาก `/api/data`
+- **ควบคุมจังหวะ/เงื่อนไขได้จำกัด** ไม่สามารถหยุด refresh ชั่วคราว, ปรับ interval แบบ dynamic, หรือแสดง Loading state/Error handling ได้อย่างละเอียดเหมือนเขียนด้วย JavaScript
+- **เสีย State ของหน้าเว็บ** เช่น ตำแหน่ง scroll, ค่าที่กรอกในฟอร์ม (ถ้ามี) จะรีเซ็ตทุกครั้งที่โหลดหน้าใหม่
+- ปรับแต่ง UI แบบ Interactive (เช่น กราฟ real-time, Animation, sound effect) ไม่ได้เลย เพราะต้องพึ่ง JavaScript เท่านั้น
+
+โดยสรุป Meta Refresh เหมาะกับงานสาธิตหรือระบบง่ายๆ ที่เน้นความเรียบง่ายและใช้ทรัพยากรฝั่ง Server น้อย ส่วน `fetch()` เหมาะกับ Dashboard ที่ต้องการ UX ที่ลื่นไหลกว่าและมีการอัปเดตข้อมูลแบบ real-time จริงจัง
 
 ---
 

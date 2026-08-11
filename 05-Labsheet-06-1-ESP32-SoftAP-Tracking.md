@@ -81,16 +81,33 @@ classDiagram
 
 | อุปกรณ์ที่ใช้ทดสอบ (เช่น iPhone/Android) | MAC Address ที่ดักจับได้ | Association ID (AID) | หมายเลข IP Address ที่ได้ (ถ้าทราบ) |
 | :--- | :--- | :---: | :---: |
-| **อุปกรณ์ที่ 1** | | | |
-| **อุปกรณ์ที่ 2** | | | |
+| **อุปกรณ์ที่ 1** | `CA:AF:CD:09:14:90` | 1 | `192.168.4.2`* |
+| **อุปกรณ์ที่ 2** | `4A:F4:D1:DD:5E:C9` | 2 | `192.168.4.3`* |
+
+\*หมายเหตุ: log ไม่ได้ผูก MAC เข้ากับ IP โดยตรงในบรรทัดเดียวกัน แต่เรียงตามลำดับเวลา DHCP ASSIGN สองรายการที่เกิดขึ้นถัดจากการ join ตามลำดับ (อุปกรณ์ที่ join ก่อน/AID น้อยกว่า มักได้รับ IP ก่อน) หากต้องการความแม่นยำ 100% ควรตรวจสอบเพิ่มจาก DHCP lease table หรือ `esp_netif_dhcps` log แบบละเอียด (mac-to-ip) ในเฟิร์มแวร์จริง
 
 ---
 
 ## 7. คำถามท้ายการทดลอง (Post-Lab Questions)
 
 1. เหตุใด IP Address เริ่มต้นของ ESP32 SoftAP จึงเป็น `192.168.4.1` และ DHCP Server บน ESP32 เริ่มแจกจ่าย IP ที่หมายเลขใด?
+
+`192.168.4.1` เป็นค่า default gateway IP ที่ ESP-IDF กำหนดไว้ในไลบรารี `esp_netif` สำหรับโหมด SoftAP (`esp_netif_create_default_wifi_ap()`) โดยตั้งเป็นค่าเริ่มต้นมาตรฐานของ framework เพื่อให้ตัว ESP32 เองทำหน้าที่เป็นทั้ง Access Point และ Gateway/Router ให้กับวง LAN ไร้สายที่สร้างขึ้น จากนั้น DHCP Server ที่ทำงานอยู่บน interface เดียวกัน (`WIFI_AP_DEF`) จะเริ่มแจกจ่าย IP ให้กับ client ที่เชื่อมต่อเข้ามา **โดยเริ่มจาก `192.168.4.2` เป็นต้นไป** (เห็นได้จาก log: `DHCP server assigned IP to a client, IP is: 192.168.4.2` และ `192.168.4.3`) เนื่องจากหมายเลข `.4.1` ถูกใช้เป็น IP ของตัว ESP32/Gateway เองไปแล้ว จึงไม่สามารถแจกซ้ำให้ client ได้
+
 2. สมาชิกตัวแปร `mac` ในโครงสร้าง `wifi_event_ap_staconnected_t` สามารถนำไปประยุกต์ใช้ทำระบบความปลอดภัยขั้นสูง (เช่น MAC Filtering) ได้อย่างไร?
+
+เมื่อเกิด event `WIFI_EVENT_AP_STACONNECTED` ตัว event handler จะได้รับพอยน์เตอร์ไปยังโครงสร้าง `wifi_event_ap_staconnected_t` ซึ่งมีสมาชิก `mac[6]` เก็บ MAC address ของ client ที่เพิ่งเชื่อมต่อเข้ามา นักพัฒนาสามารถนำค่านี้ไปใช้ต่อยอดด้านความปลอดภัยได้ เช่น
+
+- **Whitelist/Blacklist filtering**: เปรียบเทียบค่า `mac` กับรายการ MAC ที่อนุญาต (whitelist) หรือรายการต้องห้าม (blacklist) ที่เก็บไว้ใน NVS หรือหน่วยความจำ หากไม่ตรงกับ whitelist หรือพบใน blacklist ให้เรียก `esp_wifi_deauth_sta()` เพื่อตัดการเชื่อมต่อทันที
+- **Logging/Audit trail**: บันทึก MAC พร้อม timestamp ลง log หรือฐานข้อมูลภายนอก เพื่อใช้ตรวจสอบย้อนหลัง (forensic) ว่ามีใครเคยเชื่อมต่อเข้ามาบ้าง ตรงกับ concept "FORENSIC EVENT" ที่ปรากฏใน log ตัวอย่าง
+- **Rate limiting / Rogue detection**: ตรวจจับ MAC แปลกปลอมที่พยายามเชื่อมต่อซ้ำๆ ในเวลาสั้นๆ ซึ่งอาจเป็นสัญญาณของการโจมตี (เช่น deauth flood หรือ brute-force)
+- **Device-specific policy**: ใช้ MAC เป็น key เพื่อกำหนดสิทธิ์การใช้งานเครือข่ายที่แตกต่างกันต่ออุปกรณ์ (เช่น bandwidth limit, VLAN tagging)
+
+ข้อควรระวังคือ MAC address สามารถถูกปลอมแปลง (MAC spoofing) ได้ง่าย จึงไม่ควรใช้เป็นกลไกความปลอดภัยเพียงอย่างเดียว ควรใช้ร่วมกับการเข้ารหัสระดับ WPA2/WPA3 และการยืนยันตัวตนอื่นเพิ่มเติม
+
 3. หากมี Client พยายามเชื่อมต่อเป็นเครื่องที่ 5 (เกินค่า `max_connection = 4`) จะเกิดเหตุการณ์ใดขึ้นในระดับสัญญาณวิทยุ?
+
+ในระดับ 802.11 MAC/PHY เมื่อ ESP32 SoftAP ถูกตั้งค่า `max_connection = 4` และมี client ตัวที่ 5 พยายามส่ง **Association Request** เข้ามา ฝ่าย AP (ESP32) จะปฏิเสธคำขอโดยตอบกลับด้วย **Association Response frame ที่มี status code เป็น "reject" หรือค่าที่ระบุว่า AP is unable to handle additional associated stations** (เทียบเท่ากับ IEEE 802.11 status code 17: `AP_UNABLE_TO_HANDLE_NEW_STA`) กล่าวคือกระบวนการ 802.11 Authentication อาจสำเร็จ แต่ขั้นตอน Association จะถูกปฏิเสธ ทำให้ client ไม่ได้รับ AID และไม่สามารถเข้าร่วมเครือข่ายได้ (จะไม่เกิด event `WIFI_EVENT_AP_STACONNECTED` และไม่มีการแจก IP จาก DHCP) ฝั่ง client มักจะแสดงสถานะ "ไม่สามารถเชื่อมต่อได้" หรือพยายาม retry การ associate ใหม่ตามกลไกของ driver Wi-Fi ของตัวเอง
 
 
 ---

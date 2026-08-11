@@ -12,7 +12,7 @@
 
 static const char *TAG = "SMART_ATTENDANCE";
 
-#define AP_SSID          "CLASSROOM_ATTENDANCE_AP"
+#define AP_SSID          "ESP32_AP_0043"
 #define AP_PASS          "12345678"
 #define RSSI_THRESHOLD   -60
 
@@ -26,8 +26,11 @@ typedef struct {
 static student_record_t s_records[5];
 static int s_student_count = 0;
 
+// ------------------------------------------------------------------
+// GET "/" — แสดงหน้า Dashboard พร้อมตารางรายชื่ออุปกรณ์ที่เชื่อมต่อ
+// ------------------------------------------------------------------
 static esp_err_t http_attendance_html_handler(httpd_req_t *req) {
-    char resp[1024];
+    char resp[2048];
     int len = snprintf(resp, sizeof(resp),
         "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>"
         "<style>body{font-family:Arial;text-align:center;background:#f4f4f9;padding:20px;}"
@@ -44,7 +47,7 @@ static esp_err_t http_attendance_html_handler(httpd_req_t *req) {
         "<table><tr><th>Device MAC</th><th>RSSI (dBm)</th><th>Proximity Status</th></tr>");
 
     for (int i = 0; i < s_student_count; i++) {
-        char status_str[32];
+        char status_str[64];
         if (s_records[i].rssi >= RSSI_THRESHOLD) {
             snprintf(status_str, sizeof(status_str), "<font color='green'><b>NEAR (Valid)</b></font>");
         } else {
@@ -60,6 +63,28 @@ static esp_err_t http_attendance_html_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// ------------------------------------------------------------------
+// POST "/checkin" — Handler สำหรับปุ่ม "Confirm Attendance"
+// (เดิมไม่มี handler นี้ ทำให้กดปุ่มแล้วขึ้น 404 Not Found)
+// ------------------------------------------------------------------
+static esp_err_t http_checkin_post_handler(httpd_req_t *req) {
+    ESP_LOGI(TAG, "[CHECK-IN]: Attendance confirmed via button press");
+
+    const char *resp =
+        "<html><head><meta http-equiv='refresh' content='1;url=/'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<style>body{font-family:Arial;text-align:center;padding-top:50px;}</style>"
+        "</head><body><h2 style='color:green;'>✅ Check-in Confirmed!</h2>"
+        "<p>Redirecting back...</p></body></html>";
+
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+// ------------------------------------------------------------------
+// เริ่มต้น HTTP Server และลงทะเบียนทั้งสอง URI
+// ------------------------------------------------------------------
 static void start_web_server(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     httpd_handle_t server = NULL;
@@ -72,6 +97,15 @@ static void start_web_server(void) {
             .user_ctx = NULL
         };
         httpd_register_uri_handler(server, &uri_get);
+
+        httpd_uri_t uri_post = {
+            .uri      = "/checkin",
+            .method   = HTTP_POST,
+            .handler  = http_checkin_post_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &uri_post);
+
         ESP_LOGI(TAG, "Attendance Web Server Started at http://192.168.4.1");
     }
 }
